@@ -12,7 +12,8 @@ const VIOLATION_WINDOW = 60 * 60;      // 1 hour
 const BAN_DURATION = 60 * 60 * 24;     // 24 hours
 
 export async function rateLimiter(req, res, next) {
-  const ip = req.ip;
+  try {
+    const ip = req.ip;
 
   // Check if IP is banned
   if (await redisClient.exists(`ban:${ip}`)) {
@@ -55,4 +56,10 @@ export async function rateLimiter(req, res, next) {
   }
 
   next();
+  } catch (error) {
+     //If redis is down or unreachable
+     console.log("Redis unavailable, skipping rate limit", error.message);
+
+     next()
+  }
 }

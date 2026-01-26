@@ -1,7 +1,6 @@
 import { Queue } from "bullmq";
 import { connection } from "./redis.js";
 
-export const logQueue = new Queue("rate-limit-logs", {
+export const deadLetterQueue = new Queue("rate-limit-dlq", {
   connection
 });
-

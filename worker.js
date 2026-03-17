@@ -7,7 +7,7 @@ const worker = new Worker(
   async job => {
     console.log("Blocked IP Logged:", job.data);
   },
-  { connection }
+  { connection , concurrency: 5}
 );
 
 // DLQ integration

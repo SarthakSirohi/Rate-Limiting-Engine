@@ -1,4 +1,5 @@
 import { createClient } from "redis";
+import { logQueue } from "./queue";
 
 const redisClient = createClient();
 await redisClient.connect();
@@ -32,6 +33,13 @@ export async function rateLimiter(req, res, next) {
 
   // Rate limit exceeded
   if (requests > MAX_REQUESTS) {
+
+    await logQueue.add("blocked-ip", {
+      ip,
+      requests,
+      timestamp: new Date().toISOString()
+    });
+
     const violationKey = `violation:${ip}`;
     const violations = await redisClient.incr(violationKey);
 
@@ -44,6 +52,12 @@ export async function rateLimiter(req, res, next) {
       await redisClient.set(`ban:${ip}`, "1", {
         EX: BAN_DURATION
       });
+
+      logQueue.add("ip-banned", {
+        ip,
+        violations,
+        bannedAt: new Date().toISOString()
+      })
 
       return res.status(403).json({
         message: "IP banned for 24 hours"

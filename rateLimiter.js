@@ -1,5 +1,5 @@
 import { createClient } from "redis";
-import { logQueue } from "./queue";
+import { logQueue } from "./queue.js";
 
 const redisClient = createClient();
 await redisClient.connect();
@@ -11,6 +11,7 @@ const MAX_REQUESTS = 20;    // per IP
 const MAX_VIOLATIONS = 10;
 const VIOLATION_WINDOW = 60 * 60;      // 1 hour
 const BAN_DURATION = 60 * 60 * 24;     // 24 hours
+const ALERT_THRESHOLD = 20; // suspicious activity threshold
 
 export async function rateLimiter(req, res, next) {
   try {
@@ -46,6 +47,24 @@ export async function rateLimiter(req, res, next) {
     if (violations === 1) {
       await redisClient.expire(violationKey, VIOLATION_WINDOW);
     }
+
+      //  SECURITY ALERT TRACKING
+      const alertKey = `alerts:${ip}`;
+      const alertCount = await redisClient.incr(alertKey);
+
+      if (alertCount === 1) {
+        await redisClient.expire(alertKey, 300); // 5 min window
+      }
+
+      // Trigger alert
+      if (alertCount >= ALERT_THRESHOLD) {
+        await logQueue.add("security-alert", {
+          ip,
+          alertCount,
+          message: "Suspicious activity detected",
+          timestamp,
+        });
+      }
 
     // Auto-ban IP
     if (violations >= MAX_VIOLATIONS) {

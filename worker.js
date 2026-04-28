@@ -1,40 +1,35 @@
 import { Worker } from "bullmq";
 import { connection } from "./redis.js";
-import { deadLetterQueue } from "./DeadLetterQueue.js";
+import { deadLetterQueue } from "./dlq.js";
 
 const worker = new Worker(
   "rate-limit-logs",
   async (job) => {
-    const { name, data } = job;
+    const { data } = job;
 
-    if (name === "blocked-ip") {
-      console.log("🚫 Blocked IP:", data);
+    if (data.blocked) {
+      console.log("BLOCKED:", data.ip);
     }
 
-    if (name === "ip-banned") {
-      console.log("🔴 IP BANNED:", data);
+    if (data.alert) {
+      console.log("ALERT:", data.ip);
     }
 
-    // 🚨 NEW: SECURITY ALERT
-    if (name === "security-alert") {
-      console.log("🚨 SECURITY ALERT:", data);
+    if (data.banned) {
+      console.log("BANNED:", data.ip);
     }
   },
   { connection, concurrency: 5 }
 );
 
-// DLQ Integration
+// DLQ
 worker.on("failed", async (job, err) => {
   if (job.attemptsMade >= job.opts.attempts) {
-    try {
-      await deadLetterQueue.add("failed-job", {
-        originalJobId: job.id,
-        payload: job.data,
-        reason: err.message,
-        failedAt: new Date().toISOString(),
-      });
-    } catch (dlqError) {
-      console.error("DLQ write failed:", dlqError.message);
-    }
+    await deadLetterQueue.add("failed-job", {
+      id: job.id,
+      data: job.data,
+      error: err.message,
+      time: new Date().toISOString(),
+    });
   }
 });

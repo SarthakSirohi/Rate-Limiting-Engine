@@ -1,98 +1,86 @@
-import { createClient } from "redis";
+import { redisClient } from "./redis.js";
 import { logQueue } from "./queue.js";
 
-const redisClient = createClient();
-await redisClient.connect();
+const WINDOW = 60;
+const MAX_REQUESTS = 20;
 
-const WINDOW_SIZE = 60;      // 1 minute
-const MAX_REQUESTS = 20;    // per IP
-
-// AUTO-BAN CONFIG
+const ALERT_THRESHOLD = 20;
 const MAX_VIOLATIONS = 10;
-const VIOLATION_WINDOW = 60 * 60;      // 1 hour
-const BAN_DURATION = 60 * 60 * 24;     // 24 hours
-const ALERT_THRESHOLD = 20; // suspicious activity threshold
+
+const BAN_DURATION = 60 * 60 * 24;
+const VIOLATION_WINDOW = 60 * 60;
 
 export async function rateLimiter(req, res, next) {
   try {
     const ip = req.ip;
+    const timestamp = new Date().toISOString();
 
-  // Check if IP is banned
-  if (await redisClient.exists(`ban:${ip}`)) {
-    return res.status(403).json({
-      message: "IP banned due to excessive abuse"
-    });
-  }
-
-  const rateKey = `rate:${ip}`;
-  const requests = await redisClient.incr(rateKey);
-
-  // Start rate limit window
-  if (requests === 1) {
-    await redisClient.expire(rateKey, WINDOW_SIZE);
-  }
-
-  // Rate limit exceeded
-  if (requests > MAX_REQUESTS) {
-
-    await logQueue.add("blocked-ip", {
-      ip,
-      requests,
-      timestamp: new Date().toISOString()
-    });
-
-    const violationKey = `violation:${ip}`;
-    const violations = await redisClient.incr(violationKey);
-
-    if (violations === 1) {
-      await redisClient.expire(violationKey, VIOLATION_WINDOW);
+    // Check ban
+    if (await redisClient.exists(`ban:${ip}`)) {
+      return res.status(403).json({ message: "IP banned" });
     }
 
-      //  SECURITY ALERT TRACKING
+    // Rate limiting
+    const rateKey = `rate:${ip}`;
+    const requests = await redisClient.incr(rateKey);
+
+    if (requests === 1) {
+      await redisClient.expire(rateKey, WINDOW);
+    }
+
+    let event = {
+      ip,
+      timestamp,
+      blocked: false,
+      alert: false,
+      banned: false,
+      requests,
+    };
+
+    if (requests > MAX_REQUESTS) {
+      event.blocked = true;
+
+      // Violations tracking
+      const violationKey = `violations:${ip}`;
+      const violations = await redisClient.incr(violationKey);
+
+      if (violations === 1) {
+        await redisClient.expire(violationKey, VIOLATION_WINDOW);
+      }
+
+      // Alert tracking
       const alertKey = `alerts:${ip}`;
       const alertCount = await redisClient.incr(alertKey);
 
       if (alertCount === 1) {
-        await redisClient.expire(alertKey, 300); // 5 min window
+        await redisClient.expire(alertKey, 300);
       }
 
-      // Trigger alert
-      if (alertCount >= ALERT_THRESHOLD) {
-        await logQueue.add("security-alert", {
-          ip,
-          alertCount,
-          message: "Suspicious activity detected",
-          timestamp,
+      if (alertCount === ALERT_THRESHOLD) {
+        event.alert = true;
+      }
+
+      // Ban logic
+      if (violations === MAX_VIOLATIONS) {
+        await redisClient.set(`ban:${ip}`, "1", {
+          EX: BAN_DURATION,
         });
+        event.banned = true;
       }
 
-    // Auto-ban IP
-    if (violations >= MAX_VIOLATIONS) {
-      await redisClient.set(`ban:${ip}`, "1", {
-        EX: BAN_DURATION
+      // SINGLE unified event
+      await logQueue.add("rate-limit-event", event, {
+        jobId: `event:${ip}:${timestamp}`, // avoids duplicates per request
       });
 
-      logQueue.add("ip-banned", {
-        ip,
-        violations,
-        bannedAt: new Date().toISOString()
-      })
-
-      return res.status(403).json({
-        message: "IP banned for 24 hours"
+      return res.status(429).json({
+        message: "Too many requests",
       });
     }
 
-    return res.status(429).json({
-      message: "Too many requests"
-    });
-  }
-
-  next();
-  } catch (error) {
-     //If redis is down or unreachable
-     console.log("Redis unavailable, skipping rate limit", error.message);
-
-     next()
+    next();
+  } catch (err) {
+    console.error("Rate limiter error:", err);
+    next();
   }
 }
